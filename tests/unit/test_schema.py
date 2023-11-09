@@ -1,4 +1,5 @@
 import pathlib
+
 import pytest
 from pydantic import ValidationError
 from redis.commands.search.field import (
@@ -13,9 +14,9 @@ from redisvl.schema import (
     FlatVectorField,
     GeoFieldSchema,
     HNSWVectorField,
+    IndexModel,
     NumericFieldSchema,
     SchemaModel,
-    IndexModel,
     TagFieldSchema,
     TextFieldSchema,
     read_schema,
@@ -24,6 +25,7 @@ from redisvl.schema import (
 
 def get_base_path():
     return pathlib.Path(__file__).parent.resolve()
+
 
 # Utility functions to create schema instances with default values
 def create_text_field_schema(**kwargs):
@@ -196,16 +198,19 @@ def test_schema_model_validation_failures():
 
 
 def test_read_hash_schema():
-    hash_schema = read_schema(str(get_base_path().joinpath("../sample_hash_schema.yaml")))
+    hash_schema = read_schema(
+        str(get_base_path().joinpath("../sample_hash_schema.yaml"))
+    )
     assert hash_schema.index.name == "hash-test"
 
 
 def test_read_json_schema():
-    json_schema = read_schema(str(get_base_path().joinpath("../sample_json_schema.yaml")))
+    json_schema = read_schema(
+        str(get_base_path().joinpath("../sample_json_schema.yaml"))
+    )
     assert json_schema.index.name == "json-test"
 
 
 def test_read_schema_file_not_found():
     with pytest.raises(FileNotFoundError):
         read_schema("non_existent_file.yaml")
-
