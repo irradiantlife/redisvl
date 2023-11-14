@@ -28,14 +28,12 @@ from redisvl.query.filter import (
     Text,
     Num
 )
-
-from llama_index.readers.redis.utils import (
-    # TokenEscaper,
-    # array_to_buffer,
-    # check_redis_modules_exist,
-    # convert_bytes,
-    # get_redis_query,
+from redisvl.schema import (
+    TagFieldSchema,
+    TextFieldSchema,
+    NumericFieldSchema
 )
+
 from llama_index.schema import (
     BaseNode,
     MetadataMode,
