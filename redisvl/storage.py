@@ -173,7 +173,7 @@ class BaseStorage:
         ttl: Optional[int] = None,
         preprocess: Optional[Callable] = None,
         batch_size: Optional[int] = None,
-    ):
+    ) -> List[str]:
         """
         Write a batch of objects to Redis as hash entries.
 
@@ -185,6 +185,9 @@ class BaseStorage:
             ttl (Optional[int]): Time-to-live in seconds for each key. Defaults to None.
             preprocess (Optional[Callable]): A function to preprocess objects before storage. Defaults to None.
             batch_size (Optional[int]): Number of objects to write in a single Redis pipeline execution. Defaults to class's default batch size.
+
+        Returns:
+            List[str]: List of Redis keys written to the database.
 
         Raises:
             ValueError: If the length of provided keys does not match the length of objects.
@@ -198,6 +201,7 @@ class BaseStorage:
             )  # Use default or calculate based on the input data
 
         keys_iterator = iter(keys) if keys else None
+        redis_keys = []
 
         with redis_client.pipeline(transaction=False) as pipe:
             for i, obj in enumerate(objects, start=1):
@@ -206,9 +210,13 @@ class BaseStorage:
                     if keys_iterator
                     else self._create_key(obj, key_field)
                 )
+                # TODO do we need to do this check?
+                # if not key.startswith(self._prefix):
+                #     key = self._key(key, self._prefix, self._key_separator)
                 obj = self._preprocess(preprocess, obj)
                 self._validate(obj)
                 self._set(pipe, key, obj)
+                redis_keys.append(key)
                 if ttl:
                     pipe.expire(key, ttl)  # Set TTL if provided
                 # execute mini batch
@@ -217,6 +225,7 @@ class BaseStorage:
             # clean up batches if needed
             if i % batch_size != 0:
                 pipe.execute()
+            return redis_keys
 
     async def awrite(
         self,
@@ -227,7 +236,7 @@ class BaseStorage:
         ttl: Optional[int] = None,
         preprocess: Optional[Callable] = None,
         concurrency: Optional[int] = None,
-    ):
+    ) -> List[str]:
         """
         Asynchronously write objects to Redis as hash entries with concurrency control.
 
@@ -239,6 +248,9 @@ class BaseStorage:
             ttl (Optional[int]): Time-to-live in seconds for each key. Defaults to None.
             preprocess (Optional[Callable]): An async function to preprocess objects before storage. Defaults to None.
             concurrency (Optional[int]): The maximum number of concurrent write operations. Defaults to class's default concurrency level.
+
+        Returns:
+            List[str]: List of Redis keys written to the database.
 
         Raises:
             ValueError: If the length of provided keys does not match the length of objects.
@@ -261,6 +273,7 @@ class BaseStorage:
                 await self._aset(redis_client, key, obj)
                 if ttl:
                     await redis_client.expire(key)
+                return key
 
         if keys_iterator:
             tasks = [
@@ -269,7 +282,8 @@ class BaseStorage:
         else:
             tasks = [asyncio.create_task(_load(obj)) for obj in objects]
 
-        await asyncio.gather(*tasks)
+        redis_keys = await asyncio.gather(*tasks)
+        return redis_keys
 
     def get(
         self, redis_client: Redis, keys: Iterable[str], batch_size: Optional[int] = None

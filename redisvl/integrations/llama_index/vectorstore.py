@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import fsspec
 
 from redisvl.utils.token_escaper import TokenEscaper
-from redisvl.utils.utils import array_to_buffer, check_redis_modules_exist, convert_bytes
+from redisvl.utils.utils import (
+    array_to_buffer,
+    check_redis_modules_exist,
+    convert_bytes
+)
 from redisvl.utils.connection import (
     check_connected,
     get_async_redis_connection,
@@ -18,15 +22,10 @@ from redisvl.index import (
     SearchIndex,
     AsyncSearchIndex
 )
-from redisvl.query import (
-    VectorQuery,
-    CountQuery,
-    FilterQuery
-)
+from redisvl.query import VectorQuery
 from redisvl.query.filter import (
     Tag,
-    Text,
-    Num
+    FilterExpression
 )
 from redisvl.schema import (
     TagFieldSchema,
@@ -47,7 +46,10 @@ from llama_index.vector_stores.types import (
     VectorStoreQuery,
     VectorStoreQueryResult,
 )
-from llama_index.vector_stores.utils import metadata_dict_to_node, node_to_metadata_dict
+from llama_index.vector_stores.utils import (
+    metadata_dict_to_node,
+    node_to_metadata_dict
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -60,8 +62,6 @@ class RedisVectorStore(VectorStore):
     stores_text = True
     stores_node = True
     flat_metadata = False
-
-    tokenizer = TokenEscaper()
 
     DEFAULT_FIELDS = {
         "tag": [
@@ -135,34 +135,37 @@ class RedisVectorStore(VectorStore):
             )
 
         self._index_args = index_args if index_args is not None else {}
-        self._metadata_fields = metadata_fields if metadata_fields is not None else []
         self._overwrite = overwrite
         self._vector_field = str(self._index_args.get("vector_field", "vector"))
-        self._vector_key = str(self._index_args.get("vector_key", "vector"))
-
 
         # Create Index
-        # add vector field to list of index fields. Create lazily to allow user
-        # to specify index and search attributes in creation.
+        # TODO - is this how we want to construct it?
+        self.index = SearchIndex.from_dict({
+            "index": {
+                "name": index_name,
+                "prefix": index_prefix+prefix_ending,
+                "key_separator": "_",
+                "storage_type": "hash"
+            },
+            "fields": self._create_fields(metadata_fields)
+        })
+        self.index.connect(redis_url, **kwargs)
 
+    def _create_fields(self, metadata_fields: Optional[List[str]]) -> Dict[str, Any]:
+        """_summary_
+
+        Returns:
+            Dict[str, Any]: _description_
+        """
         fields = self.DEFAULT_FIELDS.copy()
+        # TODO: figure out how to handle the dims param
         fields.update({"vector": [self._create_vector_field(self._vector_field, **self._index_args)]})
-
         # add metadata fields to list of index fields or we won't be able to search them
-        for metadata_field in self._metadata_fields:
+        for metadata_field in metadata_fields:
             # TODO: allow addition of text fields as metadata
             # TODO: make sure we're preventing overwriting other keys (e.g. text,
             #   doc_id, id, and other vector fields)
             fields["tags"].append({"name": metadata_field, "sortable": False})
-
-        self.index = SearchIndex.from_dict({
-            "index": {
-                "name": index_name,
-                "prefix": index_prefix+prefix_ending
-            },
-            "fields": self.DEFAULT_FIELDS
-        })
-        self.index.connect(redis_url, **kwargs)
 
     @property
     def client(self) -> "RedisType":
@@ -185,32 +188,31 @@ class RedisVectorStore(VectorStore):
         if len(nodes) == 0:
             return []
 
-        # set vector dim for creation if index doesn't exist
-        self._index_args["dims"] = len(nodes[0].get_embedding())
+        # Check vector dims in schema?
+        # TODO figure out how to do this...
+        dims = len(nodes[0].get_embedding())
+        #if self._index.schema.
+        # TODO: do we need to add some kind of update schema support?
 
         self.index.create(overwrite=self._overwrite)
 
-        ids = []
-        data = []
-        for node in nodes:
-            mapping = {
+        def preprocess_node(node) -> Dict[str, Any]:
+            obj = {
                 "id": node.node_id,
                 "doc_id": node.ref_doc_id,
                 "text": node.get_content(metadata_mode=MetadataMode.NONE),
-                self._vector_key: array_to_buffer(node.get_embedding()),
+                self._vector_field: array_to_buffer(node.get_embedding()),
             }
             additional_metadata = node_to_metadata_dict(
                 node, remove_text=True, flat_metadata=self.flat_metadata
             )
-            mapping.update(additional_metadata)
+            return {**obj, **additional_metadata}
 
-            ids.append(node.node_id)
-            data.append(mapping)
-
-        self.index.load(data, key_field="id", key_separator="_")
-        # TODO need to handle this >>>
-        # key = "_".join([self._prefix, str(node.node_id)])
-
+        ids = self.index.load(
+            nodes,
+            key_field="id",
+            preprocess=preprocess_node
+        )
         _logger.info(f"Added {len(ids)} documents to index {self.index._name}")
         return ids
 
@@ -226,7 +228,7 @@ class RedisVectorStore(VectorStore):
         doc_filter = Tag("doc_id") == ref_doc_id
         results = self.index.search(str(doc_filter))
         if len(results.docs) == 0:
-            # don't raise an error but warn the user that document wasn't found
+            # don't raise an error but warn the user that doc wasn't found
             # could be a result of eviction policy
             _logger.warning(
                 f"Document with doc_id {ref_doc_id} not found "
@@ -240,7 +242,7 @@ class RedisVectorStore(VectorStore):
             pipe.execute()
 
         _logger.info(
-            f"Deleted {len(results.docs)} documents from index {self._index_name}"
+            f"Deleted {len(results.docs)} documents from index {self.index.name}"
         )
 
     def delete_index(self) -> None:
@@ -266,30 +268,26 @@ class RedisVectorStore(VectorStore):
         from redis.exceptions import RedisError
         from redis.exceptions import TimeoutError as RedisTimeoutError
 
-        return_fields = [
-            "id",
-            "doc_id",
-            "text",
-            self._vector_key,
-            "vector_score",
-            "_node_content",
-        ]
-
-        filters = _to_redis_filters(query.filters) if query.filters is not None else "*"
-
-        _logger.info(f"Using filters: {filters}")
-
         if not query.query_embedding:
             raise ValueError("Query embedding is required for querying.")
 
         redis_query = VectorQuery(
             vector=query.query_embedding,
             vector_field_name=self._vector_field,
-            return_fields=return_fields,
-            filter_expression=filters,
+            return_fields=[
+                "id",
+                "doc_id",
+                "text",
+                self._vector_field,
+                "vector_score",
+                "_node_content",
+            ],
             num_results=query.similarity_top_k
         )
-        _logger.info(f"Querying index {self.index._name}")
+        filters = _to_redis_filters(query.filters)
+        redis_query.set_filter(filters)
+
+        _logger.info(f"Querying index {self.index._name} with filters {filters}")
 
         try:
             results = self.index.query(redis_query)
@@ -331,38 +329,6 @@ class RedisVectorStore(VectorStore):
 
         _logger.info(f"Found {len(nodes)} results for query with id {ids}")
         return VectorStoreQueryResult(nodes=nodes, ids=ids, similarities=scores)
-
-    def persist(
-        self,
-        persist_path: str,
-        fs: Optional[fsspec.AbstractFileSystem] = None,
-        in_background: bool = True,
-    ) -> None:
-        """Persist the vector store to disk.
-
-        Args:
-            persist_path (str): Path to persist the vector store to. (doesn't apply)
-            in_background (bool, optional): Persist in background. Defaults to True.
-            fs (fsspec.AbstractFileSystem, optional): Filesystem to persist to.
-                (doesn't apply)
-
-        Raises:
-            redis.exceptions.RedisError: If there is an error
-                                         persisting the index to disk.
-        """
-        from redis.exceptions import RedisError
-
-        try:
-            if in_background:
-                _logger.info("Saving index to disk in background")
-                self.index.client.bgsave()
-            else:
-                _logger.info("Saving index to disk")
-                self.index.client.save()
-
-        except RedisError as e:
-            _logger.error(f"Error saving index to disk: {e}")
-            raise
 
     def _create_vector_field(
         self,
@@ -427,14 +393,8 @@ class RedisVectorStore(VectorStore):
 # must create the index with the correct metadata field before using a field as a
 #   filter, or it will return no results
 def _to_redis_filters(metadata_filters: MetadataFilters) -> str:
-    tokenizer = TokenEscaper()
-
-    filter_strings = []
+    filter_expression = FilterExpression("*")
     for filter in metadata_filters.filters:
-        # adds quotes around the value to ensure that the filter is treated as an
-        #   exact match
-        filter_string = f"@{filter.key}:{{{tokenizer.escape(str(filter.value))}}}"
-        filter_strings.append(filter_string)
+        filter_expression = filter_expression & (Tag(filter.key) == filter.value)
 
-    joined_filter_strings = " & ".join(filter_strings)
-    return f"({joined_filter_strings})"
+    return filter_expression
