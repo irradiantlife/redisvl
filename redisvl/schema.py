@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import yaml
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from redis.commands.search.field import (
     GeoField,
     NumericField,
@@ -70,7 +70,7 @@ class BaseVectorField(BaseModel):
     initial_cap: Optional[int] = None
     as_name: Optional[str] = None
 
-    @validator("algorithm", "datatype", "distance_metric", pre=True)
+    @field_validator("algorithm", "datatype", "distance_metric", mode='before')
     def uppercase_strings(cls, v):
         return v.upper()
 
